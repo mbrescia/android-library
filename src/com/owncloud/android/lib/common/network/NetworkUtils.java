@@ -24,29 +24,43 @@
 
 package com.owncloud.android.lib.common.network;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.security.GeneralSecurityException;
-import java.security.KeyStore;
-import java.security.KeyStoreException;
-import java.security.NoSuchAlgorithmException;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateException;
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.preference.PreferenceManager;
+import android.security.KeyChain;
+import android.security.KeyChainException;
 
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
+import com.owncloud.android.lib.common.utils.Log_OC;
 
 import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
 import org.apache.commons.httpclient.protocol.Protocol;
 import org.apache.http.conn.ssl.BrowserCompatHostnameVerifier;
 import org.apache.http.conn.ssl.X509HostnameVerifier;
 
-import android.content.Context;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.Socket;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.Principal;
+import java.security.PrivateKey;
+import java.security.SecureRandom;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
+import java.security.cert.X509Certificate;
 
-import com.owncloud.android.lib.common.utils.Log_OC;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509ExtendedKeyManager;
+import javax.net.ssl.X509TrustManager;
 
 public class NetworkUtils {
     
@@ -72,8 +86,11 @@ public class NetworkUtils {
     private static AdvancedSslSocketFactory mAdvancedSslSocketFactory = null;
 
     private static X509HostnameVerifier mHostnameVerifier = null;
-    
-    
+
+    private static String alias = null;
+    private static X509Certificate[] chain = null;
+    private static PrivateKey pk = null;
+
     /**
      * Registers or unregisters the proper components for advanced SSL handling.
      * @throws IOException 
@@ -100,7 +117,20 @@ public class NetworkUtils {
             }
         }
     }
-    
+
+    public static void setAlias(String alias){
+        NetworkUtils.alias = alias;
+    }
+
+    public static String getAlias(){
+        return NetworkUtils.alias;
+    }
+
+    public static boolean isAliasEmpty(){
+        return NetworkUtils.alias == null || NetworkUtils.alias.isEmpty();
+    }
+
+    /*
     public static AdvancedSslSocketFactory getAdvancedSslSocketFactory(Context context) 
     		throws GeneralSecurityException, IOException {
         if (mAdvancedSslSocketFactory  == null) {
@@ -121,6 +151,128 @@ public class NetworkUtils {
                     
             mHostnameVerifier = new BrowserCompatHostnameVerifier();
             mAdvancedSslSocketFactory = new AdvancedSslSocketFactory(sslContext, trustMgr, mHostnameVerifier);
+        }
+        return mAdvancedSslSocketFactory;
+    }
+    */
+
+    public static AdvancedSslSocketFactory getAdvancedSslSocketFactory(Context context)
+            throws GeneralSecurityException, IOException {
+
+        if (mAdvancedSslSocketFactory  == null) {
+
+            if(chain == null || pk == null || alias == null) {
+                // try to recover from preferences
+                SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(context);
+                alias = sp.getString("TLS_ALIAS", "");
+                try {
+                    chain = KeyChain.getCertificateChain(context, alias);
+                    pk = KeyChain.getPrivateKey(context, alias);
+                } catch (KeyChainException e) {
+                    e.printStackTrace();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                } catch (NullPointerException e) {
+                    e.printStackTrace();
+                }
+            }
+
+            if(chain != null) {
+                KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
+
+                X509ExtendedKeyManager keyManager = new X509ExtendedKeyManager() {
+
+                    @Override
+                    public String chooseClientAlias(String[] strings, Principal[] principals, Socket socket) {
+                        return alias;
+                    }
+
+                    @Override
+                    public String chooseServerAlias(String s, Principal[] principals, Socket socket) {
+                        return alias;
+                    }
+
+                    @Override
+                    public X509Certificate[] getCertificateChain(String s) {
+                        return chain;
+                    }
+
+                    @Override
+                    public String[] getClientAliases(String s, Principal[] principals) {
+                        return new String[]{alias};
+                    }
+
+                    @Override
+                    public String[] getServerAliases(String s, Principal[] principals) {
+                        return new String[]{alias};
+                    }
+
+                    @Override
+                    public PrivateKey getPrivateKey(String s) {
+                        return pk;
+                    }
+                };
+
+                TrustManagerFactory trustFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+                trustFactory.init(trustStore);
+                TrustManager[] trustManagers = trustFactory.getTrustManagers();
+
+                X509TrustManager[] tm = new X509TrustManager[] { new AdvancedX509TrustManager(trustStore) {
+
+                    public void checkClientTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+                    }
+
+                    public void checkServerTrusted(X509Certificate[] chain, String authType) throws CertificateException {
+                    }
+
+                    public X509Certificate[] getAcceptedIssuers() {
+                        return chain;
+                    }
+
+                    public boolean isClientTrusted(X509Certificate[] arg0) {
+                        return true;
+                    }
+
+                    public boolean isServerTrusted(X509Certificate[] arg0) {
+                        return true;
+                    }
+
+                } };
+
+                SSLContext sslContext = SSLContext.getInstance("TLS");
+                sslContext.init(new KeyManager[] {keyManager}, tm, null);
+                SSLContext.setDefault(sslContext);
+
+                mHostnameVerifier = new BrowserCompatHostnameVerifier();
+                mAdvancedSslSocketFactory = new AdvancedSslSocketFactory(sslContext, new AdvancedX509TrustManager(trustStore), mHostnameVerifier);
+            } else {
+                // can't recover the chain
+                KeyStore trustStore = getKnownServersStore(context);
+                AdvancedX509TrustManager trustMgr = new AdvancedX509TrustManager(trustStore);
+                TrustManager[] tms = new TrustManager[] { trustMgr };
+
+                SSLContext sslContext = SSLContext.getInstance("TLS");
+                if ("PKCS12".equals(KeyStore.getDefaultType())) {
+                    String alg = KeyManagerFactory.getDefaultAlgorithm();
+                    KeyManagerFactory kmf = KeyManagerFactory.getInstance(alg);
+                    kmf.init(trustStore, LOCAL_TRUSTSTORE_PASSWORD.toCharArray());
+                    sslContext.init(kmf.getKeyManagers(), tms, (SecureRandom)null);
+                } else {
+
+                    try {
+                        sslContext = SSLContext.getInstance("TLSv1.2");
+                    } catch (NoSuchAlgorithmException e) {
+                        Log_OC.w(TAG, "TLSv1.2 is not supported in this device; falling through TLSv1.0");
+                        sslContext = SSLContext.getInstance("TLSv1");
+                        // should be available in any device; see reference of supported protocols in
+                        // http://developer.android.com/reference/javax/net/ssl/SSLSocket.html
+                    }
+                    sslContext.init(null, tms, null);
+                }
+
+                mHostnameVerifier = new BrowserCompatHostnameVerifier();
+                mAdvancedSslSocketFactory = new AdvancedSslSocketFactory(sslContext, trustMgr, mHostnameVerifier);
+            }
         }
         return mAdvancedSslSocketFactory;
     }
